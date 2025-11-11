@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GPS Tacho App</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<style>
+    body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        margin: 0;
+        display: flex;
+        flex-direction: row;
+        height: 100vh;
+        background: #f0f0f5;
+    }
+    #map { flex: 1; margin: 10px; }
+    #sidePanel {
+        width: 320px;
+        display: flex;
+        flex-direction: column;
+        padding: 10px;
+        background: #fff;
+        box-shadow: 0 0 10px rgba(0,0,0,0.1);
+    }
+    #controls {
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        margin-bottom: 10px;
+    }
+    #controls input { width: 120px; padding: 5px; font-size: 14px; }
+    #controls button { padding: 5px 10px; font-size: 14px; }
+    #tachoContainer {
+        position: relative;
+        width: 150px;
+        height: 150px;
+        margin-bottom: 10px;
+    }
+    #tacho { width: 100%; height: 100%; }
+    #zeiger {
+        position: absolute;
+        width: 3px;
+        height: 65px;
+        background: red;
+        top: 20px;
+        left: 73px;
+        transform-origin: bottom center;
+        transform: rotate(0deg);
+        transition: transform 0.2s linear;
+    }
+    #routeData { font-size: 14px; margin-top: 10px; }
+    #routesList button {
+        display: block;
+        width: 100%;
+        margin: 3px 0;
+        padding: 4px;
+        font-size: 13px;
+    }
+</style>
+</head>
+<body>
+
+<div id="map"></div>
+
+<div id="sidePanel">
+    <div id="controls">
+        <input type="text" id="routeName" placeholder="Routenname">
+        <button id="startRouteBtn">Start</button>
+        <button id="stopRouteBtn">Stop</button>
+    </div>
+
+    <div id="routesList"><h3>Routen:</h3></div>
+
+    <div id="tachoContainer">
+        <canvas id="tacho"></canvas>
+        <div id="zeiger"></div>
+    </div>
+
+    <div id="routeData">
+        <p>Geschwindigkeit: <span id="speed">0</span> km/h</p>
+        <p>Durchschnitt: <span id="avgSpeed">0</span> km/h</p>
+        <p>Zeit: <span id="time">0</span> s</p>
+        <p>Höhe: <span id="altitude">0</span> m</p>
+    </div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+// ------------------- Globale Variablen -------------------
+let allRoutes = JSON.parse(localStorage.getItem('allRoutes') || '[]');
+let currentRoute = null;
+let watchID = null;
+let routePolyline = null;
+let startTime = null;
+let viewingRoute = null;
+
+// ------------------- Karte -------------------
+const map = L.map('map').setView([51.1657, 10.4515], 6);
+L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(map);
+
+// ------------------- GPS & Tacho -------------------
+function startGPS() {
+    if (!navigator.geolocation) { alert("GPS wird nicht unterstützt."); return; }
+    startTime = new Date();
+    watchID = navigator.geolocation.watchPosition(position => {
+        if (!currentRoute) return;
+        const point = {
+            timestamp: new Date().toISOString(),
+            lat: position.coords.latitude,
+            lon: position.coords.longitude,
+            speed: position.coords.speed || 0,
+            altitude: position.coords.altitude || 0
+        };
+        currentRoute.points.push(point);
+        updateTacho(point.speed);
+        updateMap();
+        updateData();
+    }, err => console.error(err), {
+        enableHighAccuracy: true,
+        maximumAge: 0,
+        timeout: 5000
+    });
+}
+
+function stopGPS() {
+    if (watchID !== null) {
+        navigator.geolocation.clearWatch(watchID);
+        watchID = null;
+        currentRoute = null;
+    }
+}
+
+// ------------------- Tacho -------------------
+function updateTacho(speed) {
+    const kmh = speed * 3.6;
+    const maxSpeed = 200;
+    const angle = 240 + (kmh / maxSpeed) * 360; // Null bei 8 Uhr
+    document.getElementById('zeiger').style.transform = `rotate(${angle}deg)`;
+    drawTacho(kmh);
+}
+
+function drawTacho(speed) {
+    const canvas = document.getElementById('tacho');
+    const ctx = canvas.getContext('2d');
+    canvas.width = 150;
+    canvas.height = 150;
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+
+    // Kreis
+    ctx.beginPath();
+    ctx.arc(75, 75, 70, 0, 2*Math.PI);
+    ctx.fillStyle = '#ddd';
+    ctx.fill();
+    ctx.strokeStyle = '#aaa';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    // Skala (Null bei 8 Uhr = 240°)
+    ctx.strokeStyle = '#000';
+    ctx.lineWidth = 1;
+    ctx.font = "9px sans-serif";
+    for(let i=0;i<=10;i++){
+        const angle = ((i/10)*360 + 240) * Math.PI/180;
+        const x1 = 75 + 60*Math.cos(angle);
+        const y1 = 75 + 60*Math.sin(angle);
+        const x2 = 75 + 70*Math.cos(angle);
+        const y2 = 75 + 70*Math.sin(angle);
+        ctx.beginPath();
+        ctx.moveTo(x1,y1);
+        ctx.lineTo(x2,y2);
+        ctx.stroke();
+        const val = Math.round(i*20);
+        const tx = 75 + 50*Math.cos(angle)-6;
+        const ty = 75 + 50*Math.sin(angle)+3;
+        ctx.fillText(val, tx, ty);
+    }
+
+    ctx.fillStyle = "black";
+    ctx.font = "12px sans-serif";
+    ctx.fillText(`Speed: ${speed.toFixed(1)} km/h`, 25, 145);
+}
+
+// ------------------- Karte aktualisieren -------------------
+function updateMap() {
+    if (currentRoute && currentRoute.points.length > 1) {
+        const latlngs = currentRoute.points.map(p => [p.lat, p.lon]);
+        if (routePolyline) map.removeLayer(routePolyline);
+        routePolyline = L.polyline(latlngs, {color: 'blue'}).addTo(map);
+        map.fitBounds(routePolyline.getBounds());
+    } else if (viewingRoute && viewingRoute.points.length > 1) {
+        const latlngs = viewingRoute.points.map(p => [p.lat, p.lon]);
+        if (routePolyline) map.removeLayer(routePolyline);
+        routePolyline = L.polyline(latlngs, {color: 'green'}).addTo(map);
+        map.fitBounds(routePolyline.getBounds());
+    }
+}
+
+// ------------------- Routenverwaltung -------------------
+function renderRoutesList() {
+    const div = document.getElementById('routesList');
+    div.innerHTML = "<h3>Routen:</h3>";
+    allRoutes.forEach(r => {
+        const btn = document.createElement('button');
+        btn.textContent = `${r.name} - ${r.startTime}`;
+        btn.onclick = () => showRoute(r);
+        div.appendChild(btn);
+    });
+}
+
+function showRoute(route) {
+    viewingRoute = route;
+    updateMap();
+    // Zeiger auf letzte Geschwindigkeit der Route
+    if(route.points.length>0){
+        const lastSpeed = route.points[route.points.length-1].speed;
+        updateTacho(lastSpeed);
+        updateDataForRoute(route);
+    }
+}
+
+// ------------------- Datenanzeige -------------------
+function updateData() {
+    if(!currentRoute) return;
+    const points = currentRoute.points;
+    const speedEl = document.getElementById('speed');
+    const avgEl = document.getElementById('avgSpeed');
+    const timeEl = document.getElementById('time');
+    const altEl = document.getElementById('altitude');
+
+    const lastSpeed = points[points.length-1].speed*3.6 || 0;
+    const avgSpeed = points.reduce((acc,p)=>acc+p.speed,0)/points.length*3.6 || 0;
+    const elapsed = Math.floor((new Date() - new Date(points[0].timestamp))/1000);
+    const alt = points[points.length-1].altitude || 0;
+
+    speedEl.textContent = lastSpeed.toFixed(1);
+    avgEl.textContent = avgSpeed.toFixed(1);
+    timeEl.textContent = elapsed;
+    altEl.textContent = alt.toFixed(1);
+}
+
+function updateDataForRoute(route){
+    if(!route.points || route.points.length===0) return;
+    const points = route.points;
+    const speedEl = document.getElementById('speed');
+    const avgEl = document.getElementById('avgSpeed');
+    const timeEl = document.getElementById('time');
+    const altEl = document.getElementById('altitude');
+
+    const lastSpeed = points[points.length-1].speed*3.6 || 0;
+    const avgSpeed = points.reduce((acc,p)=>acc+p.speed,0)/points.length*3.6 || 0;
+    const elapsed = Math.floor((new Date(points[points.length-1].timestamp) - new Date(points[0].timestamp))/1000);
+    const alt = points[points.length-1].altitude || 0;
+
+    speedEl.textContent = lastSpeed.toFixed(1);
+    avgEl.textContent = avgSpeed.toFixed(1);
+    timeEl.textContent = elapsed;
+    altEl.textContent = alt.toFixed(1);
+}
+
+// ------------------- Buttons -------------------
+document.getElementById('startRouteBtn').addEventListener('click', ()=>{
+    const name = document.getElementById('routeName').value || `Route ${allRoutes.length+1}`;
+    currentRoute = {
+        name: name,
+        startTime: new Date().toISOString(),
+        points: []
+    };
+    viewingRoute = null;
+    allRoutes.push(currentRoute);
+    localStorage.setItem('allRoutes', JSON.stringify(allRoutes));
+    startGPS();
+    renderRoutesList();
+});
+
+document.getElementById('stopRouteBtn').addEventListener('click', ()=>{
+    stopGPS();
+});
+
+// ------------------- Initialisierung -------------------
+renderRoutesList();
+// Zeiger + Tacho immer anzeigen mit Null
+updateTacho(0);
+</script>
+</body>
+</html>
+
